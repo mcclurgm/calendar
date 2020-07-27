@@ -28,8 +28,8 @@ namespace Maya.Util {
      */
 
     public void save_temp_selected_calendars () {
-        var event_store = Calendar.Store.get_event_store ();
-        var components = event_store.components_list ();
+        var calmodel = Calendar.Store.get_default ();
+        var components = calmodel.get_events ();
         var builder = new StringBuilder ();
         builder.append ("BEGIN:VCALENDAR\n");
         builder.append ("VERSION:2.0\n");

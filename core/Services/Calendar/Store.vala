@@ -38,15 +38,15 @@ public class Calendar.Store : Object {
     public GLib.DateWeekday week_starts_on { get; set; default = GLib.DateWeekday.MONDAY; }
 
     /* The component that is currently dragged */
-    public ECal.Component component_dragged { get; set; }
+    public ECal.Component drag_component { get; set; }
 
     /* Notifies when components are added, modified, or removed */
-    public signal void components_added (Gee.Collection<ECal.Component> components, E.Source source, Gee.Collection<ECal.ClientView> views);
-    public signal void components_modified (Gee.Collection<ECal.Component> components, E.Source source, Gee.Collection<ECal.ClientView> views);
-    public signal void components_removed (Gee.Collection<ECal.Component> components, E.Source source, Gee.Collection<ECal.ClientView> views);
+    public signal void events_added (Gee.Collection<ECal.Component> components, E.Source source, Gee.Collection<ECal.ClientView> views);
+    public signal void events_updated (Gee.Collection<ECal.Component> components, E.Source source, Gee.Collection<ECal.ClientView> views);
+    public signal void events_removed (Gee.Collection<ECal.Component> components, E.Source source, Gee.Collection<ECal.ClientView> views);
 
     /* Notifies when sources are added, changed, or removed */
-    public signal void source_connecting (E.Source source, GLib.Cancellable cancellable);
+    public signal void connecting (E.Source source, GLib.Cancellable cancellable);
     public signal void source_added (E.Source source);
     public signal void source_changed (E.Source source);
     public signal void source_removed (E.Source source);
@@ -64,9 +64,9 @@ public class Calendar.Store : Object {
     private Gee.Collection<E.Source> sources_add_transaction;
     private Gee.Collection<E.Source> sources_connect_transaction;
 
-    internal HashTable<string, Gee.TreeMultiMap<string, ECal.Component>> source_components;
+    internal HashTable<string, Gee.TreeMultiMap<string, ECal.Component>> source_events;
 
-    private GLib.Queue<E.Source> sources_trash;
+    private GLib.Queue<E.Source> calendar_trash;
     private E.CredentialsPrompter credentials_prompter;
 
     private static GLib.Settings state_settings;
@@ -75,15 +75,15 @@ public class Calendar.Store : Object {
         Object (source_type: source_type);
     }
 
-    private static Calendar.Store? event_store = null;
+    private static Calendar.Store? calmodel = null;
     private static Calendar.Store? task_store = null;
 
-    public static Calendar.Store get_event_store () {
-        if (event_store == null)
-            event_store = new Calendar.Store (ECal.ClientSourceType.EVENTS);
+    public static Calendar.Store get_default () {
+        if (calmodel == null)
+            calmodel = new Calendar.Store (ECal.ClientSourceType.EVENTS);
         if (state_settings == null)
             state_settings = new GLib.Settings ("io.elementary.calendar.savedstate");
-        return event_store;
+        return calmodel;
     }
 
     public static Calendar.Store get_task_store () {
@@ -97,7 +97,7 @@ public class Calendar.Store : Object {
 
         source_client = new HashTable<string, ECal.Client> (str_hash, str_equal);
         source_views = new HashTable<string, Gee.ArrayList<ECal.ClientView>> (str_hash, str_equal);
-        source_components = new HashTable<string, Gee.TreeMultiMap<string, ECal.Component>> (str_hash, str_equal);
+        source_events = new HashTable<string, Gee.TreeMultiMap<string, ECal.Component>> (str_hash, str_equal);
         components_add_transaction = new HashTable<ECal.ClientView, Gee.Collection<ECal.Component>> (direct_hash, direct_equal);
         sources_add_transaction = new Gee.ArrayList<E.Source> (Calendar.Util.esource_equal_func);
         sources_connect_transaction = new Gee.ArrayList<E.Source> (Calendar.Util.esource_equal_func);
@@ -118,21 +118,325 @@ public class Calendar.Store : Object {
             credentials_prompter = new E.CredentialsPrompter (registry);
             credentials_prompter.set_auto_prompt (true);
 
+            registry.source_removed.connect (remove_source);
+            registry.source_changed.connect (on_source_changed);
             registry.source_added.connect (registry_source_added);
-            registry.source_changed.connect (registry_source_changed);
-            registry.source_removed.connect (registry_source_removed);
 
             // Connect to Sources
             sources_list ().foreach ((source) => {
                 registry_source_added (source);
             });
-
-        } catch (Error error) {
+        } catch (GLib.Error error) {
             critical (error.message);
         }
     }
 
     //--- Public Source API ---//
+
+
+    public void add_event (E.Source source, ECal.Component component) {
+        var views = source_get_views (source);
+
+        var components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
+        components.add (component);
+        events_added (components.read_only_view, source, views.read_only_view);
+
+        lock (components_add_transaction) {
+            foreach (var view in views) {
+                var transactional_components = components_add_transaction.get (view);
+                if (transactional_components != null) {
+                    transactional_components.add (component);
+                }
+            }
+        }
+
+
+        add_event_async.begin (source, component, (obj, res) => {
+            Idle.add (() => {
+                try {
+                    add_event_async.end (res);
+
+                } catch (Error e) {
+                    lock (components_add_transaction) {
+                        foreach (var view in views) {
+                            var transactional_components = components_add_transaction.get (view);
+                            if (transactional_components != null) {
+                                transactional_components.remove (component);
+                            }
+                        }
+                    }
+                    events_removed (components.read_only_view, source, views.read_only_view);
+
+                    error_received (e);
+                    critical (e.message);
+                }
+                return Source.REMOVE;
+            });
+        });
+    }
+
+    public bool calclient_is_readonly (E.Source source) {
+        ECal.Client? client;
+        lock (source_client) {
+            client = source_client.get (source.get_uid ());
+        }
+
+        if (client != null) {
+            return client.is_readonly ();
+        } else {
+            critical ("No client was found for source '%s'", source.dup_display_name ());
+        }
+
+        return true;
+    }
+
+    private async void add_event_async (E.Source source, ECal.Component component) throws Error {
+        unowned ICal.Component comp = component.get_icalcomponent ();
+        debug (@"Adding component '$(comp.get_uid())'");
+
+        ECal.Client? client;
+        lock (source_client) {
+            client = source_client.get (source.get_uid ());
+        }
+
+        if (client == null) {
+            critical ("No client was found for source '%s'", source.dup_display_name ());
+        } else {
+            string? uid;
+            #if E_CAL_2_0
+            yield client.create_object (comp, ECal.OperationFlags.NONE, null, out uid);
+            #else
+            yield client.create_object (comp, null, out uid);
+            #endif
+            if (uid != null) {
+                comp.set_uid (uid);
+            }
+        }
+    }
+
+    public void update_event (E.Source source, ECal.Component component, ECal.ObjModType mod_type) {
+        var views = source_get_views (source);
+
+        var components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
+        components.add (component);
+        events_updated (components.read_only_view, source, views.read_only_view);
+
+        source_component_modify.begin (source, component, mod_type, (obj, res) => {
+            Idle.add (() => {
+                try {
+                    source_component_modify.end (res);
+
+                } catch (Error e) {
+                    error_received (e);
+                    critical (e.message);
+                }
+                return Source.REMOVE;
+            });
+        });
+    }
+
+    public void remove_event (E.Source source, ECal.Component component, ECal.ObjModType mod_type) {
+        var views = source_get_views (source);
+
+        var components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
+        components.add (component);
+        events_removed (components.read_only_view, source, views.read_only_view);
+
+        source_component_remove.begin (source, component, mod_type, (obj, res) => {
+            Idle.add (() => {
+                try {
+                    source_component_remove.end (res);
+
+                } catch (Error e) {
+                    events_added (components.read_only_view, source, views.read_only_view);
+                    error_received (e);
+                    critical (e.message);
+                }
+                return Source.REMOVE;
+            });
+        });
+    }
+
+    public void trash_calendar (E.Source source) {
+        calendar_trash.push_tail (source);
+        remove_source (source);
+        source.set_enabled (false);
+    }
+
+    public void restore_calendar () {
+        if (calendar_trash.is_empty ())
+            return;
+
+        var source = calendar_trash.pop_tail ();
+        source.set_enabled (true);
+        registry_source_added (source);
+    }
+
+    public void delete_trashed_calendars () {
+        E.Source source = calendar_trash.pop_tail ();
+        while (source != null) {
+            source.remove.begin (null);
+            source = calendar_trash.pop_tail ();
+        }
+    }
+
+    public void change_month (int relative) {
+        month_start = month_start.add_months (relative);
+    }
+
+    public void change_year (int relative) {
+        month_start = month_start.add_years (relative);
+    }
+
+    public void load_all_sources () {
+        lock (source_client) {
+            foreach (var uid in source_client.get_keys ()) {
+                var source = source_get_with_uid (uid);
+
+                if (source_is_active (source)) {
+                    load_source (source);
+                }
+            }
+        }
+    }
+
+    public void add_source (E.Source source) {
+        source_connect_async.begin (source);
+    }
+
+    public void remove_source (E.Source source) {
+        source_disconnect_async.begin (source);
+    }
+
+    private async void source_disconnect_async (E.Source source) {
+        unowned string source_uid = source.get_uid ();
+
+        if (!source_client.contains (source_uid)) {
+            return;
+        }
+        debug ("Disconnecting source '%s'", source.dup_display_name ());
+        var views_removed = source_get_views (source);
+
+        var views_connected = source_get_views (source);
+        var views_connected_iterator = views_connected.iterator ();
+        while (views_connected_iterator.next ()) {
+            var view = views_connected_iterator.get ();
+            try {
+                view_remove (view);
+            } catch (Error e) {
+                error_received (e);
+                warning (e.message);
+            }
+            views_connected = source_get_views (source);
+            views_connected_iterator = views_connected.iterator ();
+        }
+
+        lock (source_views) {
+            source_views.remove (source_uid);
+        }
+
+        lock (source_client) {
+            source_client.remove (source_uid);
+        }
+
+        var components = source_events.get (source_uid).get_values ().read_only_view;
+        events_removed (components, source, views_removed.read_only_view);
+        source_events.remove (source_uid);
+
+        source_removed (source);
+    }
+
+    public Gee.Collection<ECal.Component> get_events () {
+        Gee.ArrayList<ECal.Component> components = new Gee.ArrayList<ECal.Component> ();
+
+        var sources = sources_list ();
+        if (sources != null) {
+            sources.foreach ((source) => {
+                if (source_is_active (source)) {
+                    components.add_all (source_events.get (source.dup_uid ()).get_values ().read_only_view);
+                }
+            });
+        }
+        return components;
+    }
+
+    private GLib.DateTime get_page () {
+        var month_page = state_settings.get_string ("month-page");
+        if (month_page == null || month_page == "") {
+            return new GLib.DateTime.now_local ();
+        }
+
+        var numbers = month_page.split ("-", 2);
+        var dt = new GLib.DateTime.local (int.parse (numbers[0]), 1, 1, 0, 0, 0);
+        dt = dt.add_months (int.parse (numbers[1]) - 1);
+        return dt;
+    }
+
+    private void compute_ranges () {
+        state_settings.set_string ("month-page", month_start.format ("%Y-%m"));
+
+        var month_end = month_start.add_full (0, 1, -1);
+        month_range = new Calendar.Util.DateRange (month_start, month_end);
+
+        int dow = month_start.get_day_of_week ();
+        int wso = (int) week_starts_on;
+        int offset = 0;
+
+        if (wso < dow) {
+            offset = dow - wso;
+        } else if (wso > dow) {
+            offset = 7 + dow - wso;
+        }
+
+        var data_range_first = month_start.add_days (-offset);
+
+        dow = month_end.get_day_of_week ();
+        wso = (int) (week_starts_on + 6);
+
+        // WSO must be between 1 and 7
+        if (wso > 7)
+            wso = wso - 7;
+
+        offset = 0;
+
+        if (wso < dow)
+            offset = 7 + wso - dow;
+        else if (wso > dow)
+            offset = wso - dow;
+
+        var data_range_last = month_end.add_days (offset);
+
+        data_range = new Calendar.Util.DateRange (data_range_first, data_range_last);
+        num_weeks = data_range.to_list ().size / 7;
+
+        debug (@"Date ranges: ($data_range_first <= $month_start < $month_end <= $data_range_last)");  // vala-lint=line-length
+    }
+
+    private void load_source (E.Source source) {
+        var iso_first = ECal.isodate_from_time_t ((time_t) data_range.first_dt.to_unix ());
+        var iso_last = ECal.isodate_from_time_t ((time_t) data_range.last_dt.add_days (1).to_unix ());
+
+        string query;
+        switch (source_type) {
+            case ECal.ClientSourceType.EVENTS:
+                query = @"(occur-in-time-range? (make-time \"$iso_first\") (make-time \"$iso_last\"))";
+                break;
+
+            case ECal.ClientSourceType.TASKS:
+                query = @"(AND (NOT is-completed?) (due-in-time-range? (make-time \"$iso_first\") (make-time \"$iso_last\")))";
+                break;
+
+            default:
+                return;
+        }
+
+        try {
+            view_add (source, query);
+        } catch (Error e) {
+            error_received (e);
+            critical ("Error from source '%s': %s", source.dup_display_name (), e.message);
+        }
+    }
 
     public void source_add (E.Source source) {
         debug ("Adding source '%s'", source.dup_display_name ());
@@ -160,8 +464,177 @@ public class Calendar.Store : Object {
         });
     }
 
-    public void source_connect (E.Source source) {
-        source_connect_async.begin (source);
+    private void debug_event (E.Source source, ECal.Component component) {
+        unowned ICal.Component comp = component.get_icalcomponent ();
+        debug (@"Component ['$(comp.get_summary())', $(source.dup_display_name()), $(comp.get_uid())]");
+    }
+
+    private void on_parameter_changed () {
+        compute_ranges ();
+        parameters_changed ();
+        load_all_sources ();
+    }
+
+    private void on_source_changed (E.Source source) {
+        debug ("Source changed '%s'", source.dup_display_name ());
+
+        var source_is_active = source_is_active (source);
+        var source_is_connected = source_is_connected (source);
+
+        if (source_is_active && !source_is_connected) {
+            add_source (source);
+        } else if (source_is_connected && !source_is_active) {
+            remove_source (source);
+        }
+        source_changed (source);
+    }
+
+    #if E_CAL_2_0
+    private void on_objects_added (ECal.ClientView view, SList<ICal.Component> objects) {
+    #else
+    private void on_objects_added (ECal.ClientView view, SList<weak ICal.Component> objects) {
+    #endif
+        var views = new Gee.ArrayList<ECal.ClientView> ((Gee.EqualDataFunc<ECal.ClientView>?) direct_equal);
+        views.add (view);
+
+        var client = view.client;
+        var source = view_get_source (view);
+        var source_comps = source_events.get (source.dup_uid ());
+
+        debug (@"Received $(objects.length()) added component(s) for source '%s'", source.dup_display_name ());
+        var added_components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
+        var modified_components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
+
+        lock (components_add_transaction) {
+            unowned Gee.Collection<ECal.Component> transactional_components = components_add_transaction.get (view);
+
+            objects.foreach ((ical_comp) => {
+                unowned string uid = ical_comp.get_uid ();
+
+                try {
+                    SList<ECal.Component> ecal_comps;
+
+                    if (source_type == ECal.ClientSourceType.EVENTS) {
+                        #if E_CAL_2_0
+                        client.generate_instances_for_object_sync (ical_comp, (time_t) data_range.first_dt.to_unix (), (time_t) data_range.last_dt.to_unix (), null, (comp, start, end) => {  // vala-lint=line-length
+                            var ecal_comp = new ECal.Component.from_icalcomponent (comp);
+                        #else
+                        client.generate_instances_for_object_sync (ical_comp, (time_t) data_range.first_dt.to_unix (), (time_t) data_range.last_dt.to_unix (), (ecal_comp, start, end) => {  // vala-lint=line-length
+                        #endif
+
+                            if (!added_components.contains (ecal_comp) && !modified_components.contains (ecal_comp)) {
+                                debug_event (source, ecal_comp);
+                                source_comps.set (uid, ecal_comp);
+
+                                if (transactional_components != null && transactional_components.contains (ecal_comp)) {
+                                    modified_components.add (ecal_comp);
+                                    transactional_components.remove (ecal_comp);
+                                } else {
+                                    added_components.add (ecal_comp);
+                                }
+                            }
+                            return true;
+                        });
+
+                    } else {
+                        client.get_objects_for_uid_sync (ical_comp.get_uid (), out ecal_comps, null);
+
+                        ecal_comps.foreach ((ecal_comp) => {
+                            if (!added_components.contains (ecal_comp) && !modified_components.contains (ecal_comp)) {
+                                debug_event (source, ecal_comp);
+                                source_comps.set (uid, ecal_comp);
+
+                                if (transactional_components != null && transactional_components.contains (ecal_comp)) {
+                                    modified_components.add (ecal_comp);
+                                    transactional_components.remove (ecal_comp);
+                                } else {
+                                    added_components.add (ecal_comp);
+                                }
+                            }
+                        });
+                    }
+
+                } catch (Error e) {
+                    warning (e.message);
+                }
+            });
+        }
+
+        if (!added_components.is_empty) {
+            events_added (added_components.read_only_view, source, views.read_only_view);
+        }
+
+        if (!modified_components.is_empty) {
+            events_updated (modified_components.read_only_view, source, views.read_only_view);
+        }
+    }
+
+    #if E_CAL_2_0
+    private void on_objects_modified (ECal.ClientView view, SList<ICal.Component> objects) {
+    #else
+    private void on_objects_modified (ECal.ClientView view, SList<weak ICal.Component> objects) {
+    #endif
+        var views = new Gee.ArrayList<ECal.ClientView> ((Gee.EqualDataFunc<ECal.ClientView>?) direct_equal);
+        views.add (view);
+
+        var client = view.client;
+        var source = view_get_source (view);
+
+        debug (@"Received $(objects.length()) modified component(s) for source '%s'", source.dup_display_name ());
+        var modified_components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
+
+        objects.foreach ((ical_comp) => {
+            try {
+                SList<ECal.Component> ecal_comps;
+                client.get_objects_for_uid_sync (ical_comp.get_uid (), out ecal_comps, null);
+
+                ecal_comps.foreach ((ecal_comp) => {
+                    debug_event (source, ecal_comp);
+
+                    if (!modified_components.contains (ecal_comp)) {
+                        modified_components.add (ecal_comp);
+                    }
+                });
+
+            } catch (Error e) {
+                warning (e.message);
+            }
+        });
+
+        if (!modified_components.is_empty) {
+            events_updated (modified_components.read_only_view, source, views.read_only_view);
+        }
+    }
+
+    #if E_CAL_2_0
+    private void view_ecalcomponentids_removed (ECal.ClientView view, SList<ECal.ComponentId?> cids) {
+    #else
+    private void view_ecalcomponentids_removed (ECal.ClientView view, SList<weak ECal.ComponentId?> cids) {
+    #endif
+        var views = new Gee.ArrayList<ECal.ClientView> ((Gee.EqualDataFunc<ECal.ClientView>?) direct_equal);
+        views.add (view);
+
+        var source = view_get_source (view);
+        var source_comps = source_events.get (source.get_uid ());
+
+        debug (@"Received $(cids.length()) removed component(s) for source '%s'", source.dup_display_name ());
+        var removed_components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
+
+        cids.foreach ((cid) => {
+            if (cid == null) {
+                return;
+            }
+
+            var comps = source_comps.get (cid.get_uid ());
+            foreach (ECal.Component comp in comps) {
+                removed_components.add (comp);
+                debug_event (source, comp);
+            }
+        });
+
+        if (!removed_components.is_empty) {
+            events_removed (removed_components.read_only_view, source, views.read_only_view);
+        }
     }
 
     public void source_remove (E.Source source) {
@@ -180,10 +653,6 @@ public class Calendar.Store : Object {
                 return Source.REMOVE;
             });
         });
-    }
-
-    public void source_disconnect (E.Source source) {
-        source_disconnect_async.begin (source);
     }
 
     public E.Source source_get_with_uid (string uid) {
@@ -252,46 +721,8 @@ public class Calendar.Store : Object {
         }
     }
 
-    public bool source_is_readonly (E.Source source) {
-        ECal.Client? client;
-        lock (source_client) {
-            client = source_client.get (source.get_uid ());
-        }
-
-        if (client != null) {
-            return client.is_readonly ();
-        } else {
-            critical ("No client was found for source '%s'", source.dup_display_name ());
-        }
-
-        return true;
-    }
-
     public bool source_is_connected (E.Source source) {
         return source_client.contains (source.get_uid ());
-    }
-
-    public void source_trash (E.Source source) {
-        sources_trash.push_tail (source);
-        registry_source_removed (source);
-        source.set_enabled (false);
-    }
-
-    public void source_trash_undo () {
-        if (sources_trash.is_empty ())
-            return;
-
-        var source = sources_trash.pop_tail ();
-        source.set_enabled (true);
-        registry_source_added (source);
-    }
-
-    public void source_trash_empty () {
-        E.Source source = sources_trash.pop_tail ();
-        while (source != null) {
-            source.remove.begin (null);
-            source = sources_trash.pop_tail ();
-        }
     }
 
     public E.Source? source_get_default () {
@@ -355,8 +786,8 @@ public class Calendar.Store : Object {
             ECal.ClientView view;
             client.get_view_sync (sexp, out view, null);
 
-            view.objects_added.connect ((objects) => view_icalcomponents_added (view, objects));
-            view.objects_modified.connect ((objects) => view_icalcomponents_modified (view, objects));
+            view.objects_added.connect ((objects) => on_objects_added (view, objects));
+            view.objects_modified.connect ((objects) => on_objects_modified (view, objects));
             view.objects_removed.connect ((objects) => view_ecalcomponentids_removed (view, objects));
             view.start ();
 
@@ -397,14 +828,14 @@ public class Calendar.Store : Object {
         if (component == null) {
             return false;
         }
-#if E_CAL_2_0
+        #if E_CAL_2_0
         var created = component.get_created ();
         return created.is_valid_time ();
-#else
+        #else
         ICal.Time created;
         component.get_created (out created);
         return !created.is_null_time ();
-#endif
+        #endif
     }
 
     public bool component_is_completed (ECal.Component component) {
@@ -419,22 +850,22 @@ public class Calendar.Store : Object {
             case ICal.PropertyStatus.NONE:
 
                 component.set_percent_complete (0);
-#if E_CAL_2_0
+                #if E_CAL_2_0
                 component.set_completed (new ICal.Time.null_time ());
-#else
+                #else
                 var null_time = ICal.Time.null_time ();
                 component.set_completed (ref null_time);
-#endif
+                #endif
                 break;
 
             case ICal.PropertyStatus.COMPLETED:
                 component.set_percent_complete (100);
-#if E_CAL_2_0
+                #if E_CAL_2_0
                 component.set_completed (new ICal.Time.today ());
-#else
+                #else
                 var today_time = ICal.Time.today ();
                 component.set_completed (ref today_time);
-#endif
+                #endif
                 break;
 
             default:
@@ -442,110 +873,7 @@ public class Calendar.Store : Object {
         }
     }
 
-    public void component_add (E.Source source, ECal.Component component) {
-        var views = source_get_views (source);
-
-        var components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
-        components.add (component);
-        components_added (components.read_only_view, source, views.read_only_view);
-
-        lock (components_add_transaction) {
-            foreach (var view in views) {
-                var transactional_components = components_add_transaction.get (view);
-                if (transactional_components != null) {
-                    transactional_components.add (component);
-                }
-            }
-        }
-
-
-        source_component_add.begin (source, component, (obj, res) => {
-            Idle.add (() => {
-                try {
-                    source_component_add.end (res);
-
-                } catch (Error e) {
-                    lock (components_add_transaction) {
-                        foreach (var view in views) {
-                            var transactional_components = components_add_transaction.get (view);
-                            if (transactional_components != null) {
-                                transactional_components.remove (component);
-                            }
-                        }
-                    }
-                    components_removed (components.read_only_view, source, views.read_only_view);
-
-                    error_received (e);
-                    critical (e.message);
-                }
-                return Source.REMOVE;
-            });
-        });
-    }
-
-    public void component_modify (E.Source source, ECal.Component component, ECal.ObjModType mod_type) {
-        var views = source_get_views (source);
-
-        var components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
-        components.add (component);
-        components_modified (components.read_only_view, source, views.read_only_view);
-
-        source_component_modify.begin (source, component, mod_type, (obj, res) => {
-            Idle.add (() => {
-                try {
-                    source_component_modify.end (res);
-
-                } catch (Error e) {
-                    error_received (e);
-                    critical (e.message);
-                }
-                return Source.REMOVE;
-            });
-        });
-    }
-
-    public void component_remove (E.Source source, ECal.Component component, ECal.ObjModType mod_type) {
-        var views = source_get_views (source);
-
-        var components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
-        components.add (component);
-        components_removed (components.read_only_view, source, views.read_only_view);
-
-        source_component_remove.begin (source, component, mod_type, (obj, res) => {
-            Idle.add (() => {
-                try {
-                    source_component_remove.end (res);
-
-                } catch (Error e) {
-                    components_added (components.read_only_view, source, views.read_only_view);
-                    error_received (e);
-                    critical (e.message);
-                }
-                return Source.REMOVE;
-            });
-        });
-    }
-
-    public Gee.Collection<ECal.Component> components_list () {
-        Gee.ArrayList<ECal.Component> components = new Gee.ArrayList<ECal.Component> ();
-
-        var sources = sources_list ();
-        if (sources != null) {
-            sources.foreach ((source) => {
-                if (source_is_active (source)) {
-                    components.add_all (source_components.get (source.dup_uid ()).get_values ().read_only_view);
-                }
-            });
-        }
-        return components;
-    }
-
     //--- Private ECal.Component Helpers ---//
-
-    private void component_debug (E.Source source, ECal.Component component) {
-        unowned ICal.Component comp = component.get_icalcomponent ();
-        debug (@"Component ['$(comp.get_summary())', $(source.dup_display_name()), $(comp.get_uid())]");
-    }
 
     //--- Private E.Source Helpers ---//
 
@@ -588,136 +916,19 @@ public class Calendar.Store : Object {
         }
     }
 
-    public void sources_load () {
-        lock (source_client) {
-            foreach (var uid in source_client.get_keys ()) {
-                var source = source_get_with_uid (uid);
-
-                if (source_is_active (source)) {
-                    source_load (source);
-                }
-            }
-        }
-    }
-
-    private void source_load (E.Source source) {
-        var iso_first = ECal.isodate_from_time_t ((time_t) data_range.first_dt.to_unix ());
-        var iso_last = ECal.isodate_from_time_t ((time_t) data_range.last_dt.add_days (1).to_unix ());
-
-        string query;
-        switch (source_type) {
-            case ECal.ClientSourceType.EVENTS:
-                query = @"(occur-in-time-range? (make-time \"$iso_first\") (make-time \"$iso_last\"))";
-                break;
-
-            case ECal.ClientSourceType.TASKS:
-                query = @"(AND (NOT is-completed?) (due-in-time-range? (make-time \"$iso_first\") (make-time \"$iso_last\")))";
-                break;
-
-            default:
-                return;
-        }
-
-        try {
-            view_add (source, query);
-        } catch (Error e) {
-            error_received (e);
-            critical ("Error from source '%s': %s", source.dup_display_name (), e.message);
-        }
-    }
-
     //--- Helpers to manage scheduled components in a given time range --//
 
-    public void change_month (int relative) {
-        month_start = month_start.add_months (relative);
-    }
-
-    public void change_year (int relative) {
-        month_start = month_start.add_years (relative);
-    }
-
-    private void on_parameter_changed () {
-        compute_ranges ();
-        parameters_changed ();
-        sources_load ();
-    }
-
-    private GLib.DateTime get_page () {
-        var month_page = state_settings.get_string ("month-page");
-        if (month_page == null || month_page == "") {
-            return new GLib.DateTime.now_local ();
-        }
-
-        var numbers = month_page.split ("-", 2);
-        var dt = new GLib.DateTime.local (int.parse (numbers[0]), 1, 1, 0, 0, 0);
-        dt = dt.add_months (int.parse (numbers[1]) - 1);
-        return dt;
-    }
-
-    private void compute_ranges () {
-        state_settings.set_string ("month-page", month_start.format ("%Y-%m"));
-
-        var month_end = month_start.add_full (0, 1, -1);
-        month_range = new Calendar.Util.DateRange (month_start, month_end);
-
-        int dow = month_start.get_day_of_week ();
-        int wso = (int) week_starts_on;
-        int offset = 0;
-
-        if (wso < dow) {
-            offset = dow - wso;
-        } else if (wso > dow) {
-            offset = 7 + dow - wso;
-        }
-
-        var data_range_first = month_start.add_days (-offset);
-
-        dow = month_end.get_day_of_week ();
-        wso = (int) (week_starts_on + 6);
-
-        // WSO must be between 1 and 7
-        if (wso > 7)
-            wso = wso - 7;
-
-        offset = 0;
-
-        if (wso < dow)
-            offset = 7 + wso - dow;
-        else if (wso > dow)
-            offset = wso - dow;
-
-        var data_range_last = month_end.add_days (offset);
-
-        data_range = new Calendar.Util.DateRange (data_range_first, data_range_last);
-        num_weeks = data_range.to_list ().size / 7;
-
-        debug (@"Date ranges: ($data_range_first <= $month_start < $month_end <= $data_range_last)");  // vala-lint=line-length
-    }
 
     //--- Private E.Source EDS Event Handlers --//
 
     private void registry_source_added (E.Source source) {
         if (source_is_active (source)) {
-            source_connect (source);
+            add_source (source);
         }
     }
 
-    private void registry_source_changed (E.Source source) {
-        debug ("Source changed '%s'", source.dup_display_name ());
-
-        var source_is_active = source_is_active (source);
-        var source_is_connected = source_is_connected (source);
-
-        if (source_is_active && !source_is_connected) {
-            source_connect (source);
-        } else if (source_is_connected && !source_is_active) {
-            source_disconnect (source);
-        }
-        source_changed (source);
-    }
-
-    private void registry_source_removed (E.Source source) {
-        source_disconnect (source);
+    private void remove_source (E.Source source) {
+        remove_source (source);
     }
 
     private async void source_connect_async (E.Source source) {
@@ -732,7 +943,7 @@ public class Calendar.Store : Object {
         debug ("Connecting source '%s'", source.dup_display_name ());
 
         var cancellable = new GLib.Cancellable ();
-        source_connecting (source, cancellable);
+        connecting (source, cancellable);
 
         try {
             var client = (ECal.Client) yield ECal.Client.connect (source, source_type, 30, cancellable);
@@ -747,14 +958,14 @@ public class Calendar.Store : Object {
             var components = new Gee.TreeMultiMap<string, ECal.Component> (
                 (GLib.CompareDataFunc<string>?) GLib.strcmp,
                 (GLib.CompareDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_compare_func);
-            source_components.set (source_uid, components);
+            source_events.set (source_uid, components);
 
             Idle.add (() => {
                 lock (sources_connect_transaction) {
                     sources_connect_transaction.remove (source);
                 }
                 source_added (source);
-                source_load (source);
+                load_source (source);
 
                 return GLib.Source.REMOVE;
             });
@@ -768,69 +979,7 @@ public class Calendar.Store : Object {
         }
     }
 
-    private async void source_disconnect_async (E.Source source) {
-        unowned string source_uid = source.get_uid ();
-
-        if (!source_client.contains (source_uid)) {
-            return;
-        }
-        debug ("Disconnecting source '%s'", source.dup_display_name ());
-        var views_removed = source_get_views (source);
-
-        var views_connected = source_get_views (source);
-        var views_connected_iterator = views_connected.iterator ();
-        while (views_connected_iterator.next ()) {
-            var view = views_connected_iterator.get ();
-            try {
-                view_remove (view);
-            } catch (Error e) {
-                error_received (e);
-                warning (e.message);
-            }
-            views_connected = source_get_views (source);
-            views_connected_iterator = views_connected.iterator ();
-        }
-
-        lock (source_views) {
-            source_views.remove (source_uid);
-        }
-
-        lock (source_client) {
-            source_client.remove (source_uid);
-        }
-
-        var components = source_components.get (source_uid).get_values ().read_only_view;
-        components_removed (components, source, views_removed.read_only_view);
-        source_components.remove (source_uid);
-
-        source_removed (source);
-    }
-
     //--- Private Component EDS Event Handlers ---//
-
-    private async void source_component_add (E.Source source, ECal.Component component) throws Error {
-        unowned ICal.Component comp = component.get_icalcomponent ();
-        debug (@"Adding component '$(comp.get_uid())'");
-
-        ECal.Client? client;
-        lock (source_client) {
-            client = source_client.get (source.get_uid ());
-        }
-
-        if (client == null) {
-            critical ("No client was found for source '%s'", source.dup_display_name ());
-        } else {
-            string? uid;
-#if E_CAL_2_0
-            yield client.create_object (comp, ECal.OperationFlags.NONE, null, out uid);
-#else
-            yield client.create_object (comp, null, out uid);
-#endif
-            if (uid != null) {
-                comp.set_uid (uid);
-            }
-        }
-    }
 
     private async void source_component_modify (E.Source source, ECal.Component component, ECal.ObjModType mod_type) throws Error {
         unowned ICal.Component ical_component = component.get_icalcomponent ();
@@ -844,11 +993,11 @@ public class Calendar.Store : Object {
         if (client == null) {
             critical ("No client was found for source '%s'", source.dup_display_name ());
         } else {
-#if E_CAL_2_0
+            #if E_CAL_2_0
             yield client.modify_object (ical_component, mod_type, ECal.OperationFlags.NONE, null);
-#else
+            #else
             yield client.modify_object (ical_component, mod_type, null);
-#endif
+            #endif
 
             // schedule next occurence if component was completed
             if (
@@ -856,56 +1005,56 @@ public class Calendar.Store : Object {
                 mod_type == ECal.ObjModType.THIS_AND_PRIOR &&
                 component.has_recurrences ()
             ) {
-#if E_CAL_2_0
+                #if E_CAL_2_0
                 var duration = new ICal.Duration.null_duration ();
                 duration.set_weeks (520); // roughly 10 years
                 var today = new ICal.Time.today ();
-#else
+                #else
                 var duration = ICal.Duration.null_duration ();
                 duration.weeks = 520; // roughly 10 years
                 var today = ICal.Time.today ();
-#endif
+                #endif
                 var start = ical_component.get_dtstart ();
                 if (today.compare (start) > 0) {
                     start = today;
                 }
                 var end = start.add (duration);
 
-#if E_CAL_2_0
+                #if E_CAL_2_0
                 ECal.RecurInstanceCb recur_instance_callback = (instance_comp, instance_start_timet, instance_end_timet, cancellable) => {
-#else
+                #else
                 ECal.RecurInstanceFn recur_instance_callback = (instance, instance_start_timet, instance_end_timet) => {
-#endif
+                #endif
 
-#if E_CAL_2_0
+                    #if E_CAL_2_0
                     var instance = new ECal.Component ();
                     instance.set_icalcomponent (instance_comp);
-#else
+                    #else
                     unowned ICal.Component instance_comp = instance.get_icalcomponent ();
-#endif
+                    #endif
                     if (!instance_comp.get_due ().is_null_time ()) {
                         instance_comp.set_due (instance_comp.get_dtstart ());
                     }
 
                     instance_comp.set_status (ICal.PropertyStatus.NONE);
                     instance.set_percent_complete (0);
-#if E_CAL_2_0
+                    #if E_CAL_2_0
                     instance.set_completed (new ICal.Time.null_time ());
-#else
+                    #else
                     var null_time = ICal.Time.null_time ();
                     instance.set_completed (ref null_time);
-#endif
+                    #endif
                     if (instance.has_alarms ()) {
                         instance.get_alarm_uids ().@foreach ((alarm_uid) => {
                             ECal.ComponentAlarmTrigger trigger;
-#if E_CAL_2_0
+                            #if E_CAL_2_0
                             trigger = new ECal.ComponentAlarmTrigger.relative (ECal.ComponentAlarmTriggerKind.RELATIVE_START, new ICal.Duration.null_duration ());
-#else
+                            #else
                             trigger = ECal.ComponentAlarmTrigger () {
                                 type = ECal.ComponentAlarmTriggerKind.RELATIVE_START,
                                 rel_duration = ICal.Duration.null_duration ()
                             };
-#endif
+                            #endif
                             instance.get_alarm (alarm_uid).set_trigger (trigger);
                         });
                     }
@@ -914,11 +1063,11 @@ public class Calendar.Store : Object {
                     return GLib.Source.REMOVE; // only generate one next occurence
                 };
 
-#if E_CAL_2_0
+                #if E_CAL_2_0
                 client.generate_instances_for_object_sync (ical_component, start.as_timet (), end.as_timet (), null, recur_instance_callback);
-#else
+                #else
                 client.generate_instances_for_object_sync (ical_component, start.as_timet (), end.as_timet (), recur_instance_callback);
-#endif
+                #endif
             }
         }
     }
@@ -943,159 +1092,11 @@ public class Calendar.Store : Object {
             critical ("No client was found for source '%s'", source.dup_display_name ());
         } else {
 
-#if E_CAL_2_0
+            #if E_CAL_2_0
             yield client.remove_object (uid, rid, mod_type, ECal.OperationFlags.NONE, null);
-#else
+            #else
             yield client.remove_object (uid, rid, mod_type, null);
-#endif
-        }
-    }
-
-#if E_CAL_2_0
-    private void view_icalcomponents_added (ECal.ClientView view, SList<ICal.Component> objects) {
-#else
-    private void view_icalcomponents_added (ECal.ClientView view, SList<weak ICal.Component> objects) {
-#endif
-        var views = new Gee.ArrayList<ECal.ClientView> ((Gee.EqualDataFunc<ECal.ClientView>?) direct_equal);
-        views.add (view);
-
-        var client = view.client;
-        var source = view_get_source (view);
-        var source_comps = source_components.get (source.dup_uid ());
-
-        debug (@"Received $(objects.length()) added component(s) for source '%s'", source.dup_display_name ());
-        var added_components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
-        var modified_components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
-
-        lock (components_add_transaction) {
-            unowned Gee.Collection<ECal.Component> transactional_components = components_add_transaction.get (view);
-
-            objects.foreach ((ical_comp) => {
-                unowned string uid = ical_comp.get_uid ();
-
-                try {
-                    SList<ECal.Component> ecal_comps;
-
-                    if (source_type == ECal.ClientSourceType.EVENTS) {
-#if E_CAL_2_0
-                        client.generate_instances_for_object_sync (ical_comp, (time_t) data_range.first_dt.to_unix (), (time_t) data_range.last_dt.to_unix (), null, (comp, start, end) => {  // vala-lint=line-length
-                            var ecal_comp = new ECal.Component.from_icalcomponent (comp);
-#else
-                        client.generate_instances_for_object_sync (ical_comp, (time_t) data_range.first_dt.to_unix (), (time_t) data_range.last_dt.to_unix (), (ecal_comp, start, end) => {  // vala-lint=line-length
-#endif
-
-                            if (!added_components.contains (ecal_comp) && !modified_components.contains (ecal_comp)) {
-                                component_debug (source, ecal_comp);
-                                source_comps.set (uid, ecal_comp);
-
-                                if (transactional_components != null && transactional_components.contains (ecal_comp)) {
-                                    modified_components.add (ecal_comp);
-                                    transactional_components.remove (ecal_comp);
-                                } else {
-                                    added_components.add (ecal_comp);
-                                }
-                            }
-                            return true;
-                        });
-
-                    } else {
-                        client.get_objects_for_uid_sync (ical_comp.get_uid (), out ecal_comps, null);
-
-                        ecal_comps.foreach ((ecal_comp) => {
-                            if (!added_components.contains (ecal_comp) && !modified_components.contains (ecal_comp)) {
-                                component_debug (source, ecal_comp);
-                                source_comps.set (uid, ecal_comp);
-
-                                if (transactional_components != null && transactional_components.contains (ecal_comp)) {
-                                    modified_components.add (ecal_comp);
-                                    transactional_components.remove (ecal_comp);
-                                } else {
-                                    added_components.add (ecal_comp);
-                                }
-                            }
-                        });
-                    }
-
-                } catch (Error e) {
-                    warning (e.message);
-                }
-            });
-        }
-
-        if (!added_components.is_empty) {
-            components_added (added_components.read_only_view, source, views.read_only_view);
-        }
-
-        if (!modified_components.is_empty) {
-            components_modified (modified_components.read_only_view, source, views.read_only_view);
-        }
-    }
-
-#if E_CAL_2_0
-    private void view_icalcomponents_modified (ECal.ClientView view, SList<ICal.Component> objects) {
-#else
-    private void view_icalcomponents_modified (ECal.ClientView view, SList<weak ICal.Component> objects) {
-#endif
-        var views = new Gee.ArrayList<ECal.ClientView> ((Gee.EqualDataFunc<ECal.ClientView>?) direct_equal);
-        views.add (view);
-
-        var client = view.client;
-        var source = view_get_source (view);
-
-        debug (@"Received $(objects.length()) modified component(s) for source '%s'", source.dup_display_name ());
-        var modified_components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
-
-        objects.foreach ((ical_comp) => {
-            try {
-                SList<ECal.Component> ecal_comps;
-                client.get_objects_for_uid_sync (ical_comp.get_uid (), out ecal_comps, null);
-
-                ecal_comps.foreach ((ecal_comp) => {
-                    component_debug (source, ecal_comp);
-
-                    if (!modified_components.contains (ecal_comp)) {
-                        modified_components.add (ecal_comp);
-                    }
-                });
-
-            } catch (Error e) {
-                warning (e.message);
-            }
-        });
-
-        if (!modified_components.is_empty) {
-            components_modified (modified_components.read_only_view, source, views.read_only_view);
-        }
-    }
-
-#if E_CAL_2_0
-    private void view_ecalcomponentids_removed (ECal.ClientView view, SList<ECal.ComponentId?> cids) {
-#else
-    private void view_ecalcomponentids_removed (ECal.ClientView view, SList<weak ECal.ComponentId?> cids) {
-#endif
-        var views = new Gee.ArrayList<ECal.ClientView> ((Gee.EqualDataFunc<ECal.ClientView>?) direct_equal);
-        views.add (view);
-
-        var source = view_get_source (view);
-        var source_comps = source_components.get (source.get_uid ());
-
-        debug (@"Received $(cids.length()) removed component(s) for source '%s'", source.dup_display_name ());
-        var removed_components = new Gee.ArrayList<ECal.Component> ((Gee.EqualDataFunc<ECal.Component>?) Calendar.Util.ecalcomponent_equal_func);  // vala-lint=line-length
-
-        cids.foreach ((cid) => {
-            if (cid == null) {
-                return;
-            }
-
-            var comps = source_comps.get (cid.get_uid ());
-            foreach (ECal.Component comp in comps) {
-                removed_components.add (comp);
-                component_debug (source, comp);
-            }
-        });
-
-        if (!removed_components.is_empty) {
-            components_removed (removed_components.read_only_view, source, views.read_only_view);
+            #endif
         }
     }
 }

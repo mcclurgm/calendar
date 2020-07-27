@@ -60,12 +60,12 @@ public class Maya.View.CalendarView : Gtk.Grid {
         sync_with_event_store (); // Populate stack with a grid
         stack.show_all ();
 
-        var event_store = Calendar.Store.get_event_store ();
-        event_store.parameters_changed.connect (on_event_store_parameters_changed);
+        var calmodel = Calendar.Store.get_default ();
+        calmodel.parameters_changed.connect (on_event_store_parameters_changed);
 
-        event_store.components_added.connect (on_events_added);
-        event_store.components_modified.connect (on_events_updated);
-        event_store.components_removed.connect (on_events_removed);
+        calmodel.events_added.connect (on_events_added);
+        calmodel.events_updated.connect (on_events_updated);
+        calmodel.events_removed.connect (on_events_removed);
 
         stack.notify["transition-running"].connect (() => {
             if (stack.transition_running == false) {
@@ -95,10 +95,10 @@ public class Maya.View.CalendarView : Gtk.Grid {
 
     public void today () {
         var today = Calendar.Util.datetime_strip_time (new DateTime.now_local ());
-        var event_store = Calendar.Store.get_event_store ();
+        var calmodel = Calendar.Store.get_default ();
         var start = Calendar.Util.datetime_get_start_of_month (today);
-        if (!start.equal (event_store.month_start))
-            event_store.month_start = start;
+        if (!start.equal (calmodel.month_start))
+            calmodel.month_start = start;
         sync_with_event_store ();
         days_grid.focus_date (today);
     }
@@ -106,8 +106,8 @@ public class Maya.View.CalendarView : Gtk.Grid {
     //--- Signal Handlers ---//
 
     void on_show_weeks_changed () {
-        var event_store = Calendar.Store.get_event_store ();
-        weeks.update (event_store.data_range.first_dt, event_store.num_weeks);
+        var model = Calendar.Store.get_default ();
+        weeks.update (model.data_range.first_dt, calmodel.num_weeks);
         update_spacer_visible ();
     }
 
@@ -136,8 +136,8 @@ public class Maya.View.CalendarView : Gtk.Grid {
 
     /* Indicates the month has changed */
     void on_event_store_parameters_changed () {
-        var event_store = Calendar.Store.get_event_store ();
-        if (days_grid.grid_range != null && event_store.data_range.equals (days_grid.grid_range))
+        var calmodel = Calendar.Store.get_default ();
+        if (days_grid.grid_range != null && calmodel.data_range.equals (days_grid.grid_range))
             return; // nothing to do
 
         Idle.add ( () => {
@@ -183,10 +183,10 @@ public class Maya.View.CalendarView : Gtk.Grid {
 
     /* Sets the calendar widgets to the date range of the model */
     void sync_with_event_store () {
-        var event_store = Calendar.Store.get_event_store ();
+        var calmodel = Calendar.Store.get_default ();
         DateTime previous_first = null;
         if (days_grid != null) {
-            if (days_grid.grid_range != null && (event_store.data_range.equals (days_grid.grid_range) || days_grid.grid_range.first_dt.compare (event_store.data_range.first_dt) == 0))
+            if (days_grid.grid_range != null && (calmodel.data_range.equals (days_grid.grid_range) || days_grid.grid_range.first_dt.compare (calmodel.data_range.first_dt) == 0))
                 return; // nothing to do
             if (days_grid.grid_range != null)
                 previous_first = days_grid.grid_range.first_dt;
@@ -195,13 +195,13 @@ public class Maya.View.CalendarView : Gtk.Grid {
         var big_grid = create_big_grid ();
         stack.add (big_grid);
 
-        header.update_columns (event_store.week_starts_on);
-        weeks.update (event_store.data_range.first_dt, event_store.num_weeks);
-        days_grid.set_range (event_store.data_range, event_store.month_start);
+        header.update_columns (calmodel.week_starts_on);
+        weeks.update (calmodel.data_range.first_dt, calmodel.num_weeks);
+        days_grid.set_range (calmodel.data_range, calmodel.month_start);
 
         // keep focus date on the same day of the month
         if (selected_date != null) {
-            var bumpdate = event_store.month_start.add_days (selected_date.get_day_of_month () - 1);
+            var bumpdate = calmodel.month_start.add_days (selected_date.get_day_of_month () - 1);
             days_grid.focus_date (bumpdate);
         }
 

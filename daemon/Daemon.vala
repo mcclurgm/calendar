@@ -43,11 +43,11 @@ namespace Maya {
 
         private void load_today_events () {
             event_uid = new Gee.HashMap<ECal.Component, string> ();
-            var event_store = Calendar.Store.get_event_store ();
-            event_store.components_added.connect (on_events_added);
-            event_store.components_modified.connect (on_events_updated);
-            event_store.components_removed.connect (on_events_removed);
-            event_store.month_start = Calendar.Util.datetime_get_start_of_month (new DateTime.now_local ());
+            var calmodel = Calendar.Store.get_default ();
+            calmodel.events_added.connect (on_events_added);
+            calmodel.events_updated.connect (on_events_updated);
+            calmodel.events_removed.connect (on_events_removed);
+            calmodel.month_start = Calendar.Util.datetime_get_start_of_month (new DateTime.now_local ());
         }
 
         private void on_events_added (Gee.Collection<ECal.Component> events, E.Source source, Gee.Collection<ECal.ClientView> views) {

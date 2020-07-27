@@ -43,14 +43,14 @@ public class Maya.View.Widgets.CalendarButton : Gtk.MenuButton {
 
     construct {
         sources = new GLib.List<E.Source> ();
-        var event_store = Calendar.Store.get_event_store ();
-        foreach (var src in event_store.sources_list ()) {
-            if (src.writable == true && src.enabled == true && event_store.source_is_readonly (src) == false) {
+        var calmodel = Calendar.Store.get_default ();
+        foreach (var src in calmodel.sources_list ()) {
+            if (src.writable == true && src.enabled == true && calmodel.calclient_is_readonly (src) == false) {
                 sources.append (src);
             }
         }
 
-        _current_source = event_store.source_get_default ();
+        _current_source = calmodel.source_get_default ();
 
         calendar_grid = new CalendarGrid (current_source);
         calendar_grid.halign = Gtk.Align.START;
@@ -63,7 +63,7 @@ public class Maya.View.Widgets.CalendarButton : Gtk.MenuButton {
 
         add (grid);
 
-        current_source = event_store.source_get_default ();
+        current_source = calmodel.source_get_default ();
 
         search_entry = new Gtk.SearchEntry ();
         search_entry.margin = 12;
@@ -236,7 +236,7 @@ public class Maya.View.Widgets.CalendarButton : Gtk.MenuButton {
         private void apply_source () {
             E.SourceCalendar cal = (E.SourceCalendar)_source.get_extension (E.SOURCE_EXTENSION_CALENDAR);
             label = _source.dup_display_name ();
-            location = Calendar.Store.get_event_store ().source_get_location (_source);
+            location = Calendar.Store.get_default ().source_get_location (_source);
 
             var css_color = STYLE.printf (cal.dup_color ());
             var style_provider = new Gtk.CssProvider ();

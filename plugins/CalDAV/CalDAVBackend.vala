@@ -164,10 +164,10 @@ public class Maya.CalDavBackend : GLib.Object, Maya.Backend {
                 }
             }
 
-            var event_store = Calendar.Store.get_event_store ();
-            event_store.source_add (new_source);
+            var calmodel = Calendar.Store.get_default ();
+            calmodel.source_add (new_source);
             if (set_default) {
-                event_store.source_set_default (new_source);
+                calmodel.source_set_default (new_source);
             }
 
         } catch (GLib.Error error) {

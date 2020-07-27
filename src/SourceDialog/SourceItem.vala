@@ -49,7 +49,7 @@ public class Maya.View.SourceItem : Gtk.ListBoxRow {
         calendar_name_label.hexpand = true;
 
         label = source.dup_display_name ();
-        location = Calendar.Store.get_event_store ().source_get_location (source);
+        location = Calendar.Store.get_default ().source_get_location (source);
 
         visible_checkbutton = new Gtk.CheckButton ();
         visible_checkbutton.active = cal.selected;
@@ -135,7 +135,7 @@ public class Maya.View.SourceItem : Gtk.ListBoxRow {
         edit_button.clicked.connect (() => {edit_request (source);});
 
         undo_button.clicked.connect (() => {
-            Calendar.Store.get_event_store ().source_trash_undo ();
+            Calendar.Store.get_default ().restore_calendar ();
             stack.set_visible_child_name ("calendar");
         });
 

@@ -67,7 +67,7 @@ public class Maya.View.ImportDialog : Granite.MessageDialog {
 
     private void import_files () {
         var source = calchooser_button.current_source;
-        var event_store = Calendar.Store.get_event_store ();
+        var calmodel = Calendar.Store.get_default ();
         foreach (var file in files) {
 #if E_CAL_2_0
             var ical = ECal.util_parse_ics_file (file.get_path ());

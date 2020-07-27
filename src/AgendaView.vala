@@ -107,11 +107,11 @@ public class Maya.View.AgendaView : Gtk.ScrolledWindow {
         add (grid);
 
         // Listen to changes for events
-        var event_store = Calendar.Store.get_event_store ();
-        event_store.components_added.connect (on_events_added);
-        event_store.components_removed.connect (on_events_removed);
-        event_store.components_modified.connect (on_events_updated);
-        event_store.parameters_changed.connect (on_event_store_parameters_changed);
+        var calmodel = Calendar.Store.get_default ();
+        calmodel.events_added.connect (on_events_added);
+        calmodel.events_removed.connect (on_events_removed);
+        calmodel.events_updated.connect (on_events_updated);
+        calmodel.parameters_changed.connect (on_event_store_parameters_changed);
         var time_manager = TimeManager.get_default ();
         time_manager.on_update_today.connect (on_today_changed);
 
