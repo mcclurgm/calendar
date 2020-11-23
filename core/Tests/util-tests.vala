@@ -143,6 +143,12 @@ void test_daterange_all_day () {
     assert (Calendar.Util.icalcomponent_is_in_range (event, range));
 }
 
+/*
+ *
+ * Tests for DateTime
+ *
+ */
+ 
 /** Test that we properly identify all-day events */
 void test_is_all_day_true () {
     var str = "BEGIN:VEVENT\n" +
@@ -159,12 +165,6 @@ void test_is_all_day_true () {
     Calendar.Util.icalcomponent_get_local_datetimes (event, out dtstart, out dtend);
     assert (Calendar.Util.datetime_is_all_day (dtstart, dtend));
 }
-
-/*
- *
- * Tests for DateTime
- *
- */
 
 /** Test that we properly identify non-all-day events */
 void test_is_all_day_false () {
@@ -183,6 +183,57 @@ void test_is_all_day_false () {
     assert (Calendar.Util.datetime_is_all_day (dtstart, dtend));
 }
 
+/*
+*
+* Tests for ECalComponent
+*
+*/
+
+/** Test some cases that should fall on a given day */
+void test_is_on_day_true () {
+    var str = "BEGIN:VEVENT\n" +
+              "SUMMARY:Stub event\n" +
+              "UID:example@uid\n" +
+              "DTSTART;TZID=America/Chicago:20191121T231130\n" +
+              "DTEND;TZID=America/Chicago:20191123T152330\n" +
+              "END:VEVENT\n";
+    var event = new ICal.Component.from_string (str);
+    assert (!event.get_dtstart ().is_date ());
+    assert (!event.get_dtend ().is_date ());
+    var ecalcomp = new ECal.Component.from_icalcomponent (event);
+
+    // Case 1: date contained within event
+    var day = new GLib.DateTime.local (2019,11,22,10,30,30);
+    assert (Calendar.Util.ecalcomponent_is_on_day (ecalcomp, day));
+
+    // Case 2: event ends but doesn't start on date
+    day = new GLib.DateTime.local (2019,11,23,10,30,30);
+    assert (Calendar.Util.ecalcomponent_is_on_day (ecalcomp, day));
+
+    // Case 3: event starts but doesn't end on date
+    day = new GLib.DateTime.local (2019,11,21,10,30,30);
+    assert (Calendar.Util.ecalcomponent_is_on_day (ecalcomp, day));
+
+    // Case 4: event starts and ends on date
+    str = "BEGIN:VEVENT\n" +
+              "SUMMARY:Stub event\n" +
+              "UID:example@uid\n" +
+              "DTSTART;TZID=America/Chicago:20191121T231130\n" +
+              "DTEND;TZID=America/Chicago:20191121T232330\n" +
+              "END:VEVENT\n";
+    event = new ICal.Component.from_string (str);
+    assert (!event.get_dtstart ().is_date ());
+    assert (!event.get_dtend ().is_date ());
+    ecalcomp = new ECal.Component.from_icalcomponent (event);
+    day = new GLib.DateTime.local (2019,11,21,10,30,30);
+    assert (Calendar.Util.ecalcomponent_is_on_day (ecalcomp, day));
+}
+
+/** Test some cases that should not fall on a given day */
+void test_is_on_day_false () {
+
+}
+
 void add_timezone_tests () {
     Test.add_func ("/Utils/TimeZone/floating", test_floating);
     Test.add_func ("/Utils/TimeZone/all_day", test_all_day);
@@ -199,16 +250,38 @@ void add_datetime_tests () {
     Test.add_func ("/Utils/DateTime/is_all_day_true", test_is_all_day_true);
 }
 
+void add_ecalcomponent_tests () {
+    Test.add_func ("/Utils/ECalComponent/is_on_day_true", test_is_on_day_true);
+    Test.add_func ("/Utils/ECalComponent/is_on_day_false", test_is_on_day_false);
+    Test.add_func ("/Experiments/icaltime_from_date", () => {
+        var day = new GLib.DateTime.local (2020,2,12,13,40,12);
+        var t = new ICal.Time.from_day_of_year (day.get_day_of_year (), day.get_year ());
+        debug (t.as_ical_string ());
+        unowned ICal.Timezone tz = t.get_timezone ();
+        //  assert (tz!=null);
+        debug (tz.get_tzid ());
+    });
+}
+
 int main (string[] args) {
     print ("\n");
     var original_tz = Environment.get_variable ("TZ");
     Environment.set_variable ("TZ", "America/Chicago", true);
     print ("Setting $TZ environment variable: " + Environment.get_variable ("TZ") + "\n");
+
+    // Verify time zone
+    var tz = new GLib.TimeZone.local ();
+    var time = new GLib.DateTime.local (2020,7,12,12,30,30);
+    var interval = tz.find_interval (GLib.TimeType.STANDARD, time.to_unix ());
+    var offset = tz.get_offset (interval);
+    assert (offset == -5*60*60);
+
     print ("Starting utils tests:\n");
 
     Test.init (ref args);
     add_timezone_tests ();
     add_datetime_tests ();
+    //add_ecalcomponent_tests ();
     var result = Test.run ();
 
     if (original_tz != null) {
