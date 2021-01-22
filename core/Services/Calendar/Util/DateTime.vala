@@ -88,15 +88,13 @@ namespace Calendar.Util {
         return result;
     }
 
-    /** Gets the start of the month that contains the given date
+    /** Gets the start of the month that contains the given date.
      *
      * Returns midnight (00:00) on that date.
+     *
+     * If date is not provided, this uses `DateTime.now_local ()`.
      */
-    public GLib.DateTime datetime_get_start_of_month (owned GLib.DateTime? date = null) {
-        if (date == null) {
-            date = new GLib.DateTime.now_local ();
-        }
-
+    public GLib.DateTime datetime_get_start_of_month (owned GLib.DateTime date = new GLib.DateTime.now_local ()) {
         return new GLib.DateTime.local (date.get_year (), date.get_month (), 1, 0, 0, 0);
     }
 

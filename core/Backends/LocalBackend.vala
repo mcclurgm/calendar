@@ -21,7 +21,7 @@
  */
 
 public class Maya.LocalBackend : GLib.Object, Maya.Backend {
-    E.SourceRegistry registry;
+    E.SourceRegistry? registry;
 
     public string get_name () {
         return _("On this computer");

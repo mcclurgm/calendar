@@ -24,9 +24,7 @@ public class Maya.BackendsManager : GLib.Object {
     private static Maya.BackendsManager? backends_manager = null;
 
     public static BackendsManager get_default () {
-        if (backends_manager == null)
-            backends_manager = new BackendsManager ();
-        return backends_manager;
+        return backends_manager ?? new BackendsManager ();
     }
 
     [CCode (has_target = false)]
@@ -59,6 +57,7 @@ public class Maya.BackendsManager : GLib.Object {
             critical (Module.error ());
             return;
         }
+        return_if_fail (module == null);
 
         void* function;
         module.symbol ("get_backend", out function);
@@ -78,7 +77,7 @@ public class Maya.BackendsManager : GLib.Object {
     }
 
     private void find_plugins (File base_folder) {
-        FileInfo file_info = null;
+        FileInfo? file_info = null;
         try {
             var enumerator = base_folder.enumerate_children (FileAttribute.STANDARD_NAME + "," + FileAttribute.STANDARD_TYPE + "," + FileAttribute.STANDARD_CONTENT_TYPE, 0);
             while ((file_info = enumerator.next_file ()) != null) {

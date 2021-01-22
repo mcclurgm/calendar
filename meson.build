@@ -5,6 +5,8 @@ project('io.elementary.calendar',
 
 add_project_arguments('-DGETTEXT_PACKAGE="@0@"'.format(meson.project_name()), language: 'c')
 
+add_project_arguments('--enable-experimental-non-null', language: 'vala')
+
 libexecdir = join_paths(get_option('prefix'), get_option('libexecdir'), meson.project_name())
 pluginsdir = join_paths(get_option('prefix'), get_option('libdir'), meson.project_name(), 'plugins')
 

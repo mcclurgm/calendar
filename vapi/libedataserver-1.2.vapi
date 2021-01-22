@@ -225,7 +225,7 @@ namespace E {
 		[Version (since = "3.12")]
 		public bool delete_password_sync (GLib.Cancellable? cancellable = null) throws GLib.Error;
 		public string dup_display_name ();
-		public string dup_parent ();
+		public string? dup_parent ();
 		[Version (since = "3.12")]
 		public string dup_secret_label ();
 		public string dup_uid ();
@@ -245,7 +245,7 @@ namespace E {
 		public virtual async bool get_oauth2_access_token (GLib.Cancellable? cancellable, out string out_access_token, out int out_expires_in) throws GLib.Error;
 		[Version (since = "3.8")]
 		public virtual bool get_oauth2_access_token_sync (GLib.Cancellable? cancellable, out string out_access_token, out int out_expires_in) throws GLib.Error;
-		public unowned string get_parent ();
+		public unowned string? get_parent ();
 		public bool get_remote_creatable ();
 		public bool get_remote_deletable ();
 		public bool get_removable ();
@@ -319,7 +319,7 @@ namespace E {
 		public bool enabled { get; set construct; }
 		[NoAccessorMethod]
 		public GLib.MainContext main_context { owned get; construct; }
-		public string parent { get; set; }
+		public string? parent { get; set; }
 		public bool remote_creatable { get; }
 		public bool remote_deletable { get; }
 		public bool removable { get; }
@@ -360,7 +360,7 @@ namespace E {
 		public string dup_method ();
 		[Version (since = "3.12")]
 		public string dup_proxy_uid ();
-		public string dup_user ();
+		public string? dup_user ();
 		[Version (since = "3.16")]
 		public unowned string get_credential_name ();
 		public unowned string get_host ();
@@ -370,7 +370,7 @@ namespace E {
 		public unowned string get_proxy_uid ();
 		[Version (since = "3.10")]
 		public bool get_remember_password ();
-		public unowned string get_user ();
+		public unowned string? get_user ();
 		[Version (since = "3.8")]
 		public GLib.SocketConnectable ref_connectable ();
 		public bool required ();

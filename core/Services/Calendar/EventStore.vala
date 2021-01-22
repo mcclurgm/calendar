@@ -63,9 +63,7 @@ public class Calendar.EventStore : Object {
     private static GLib.Settings? state_settings = null;
 
     public static Calendar.EventStore get_default () {
-        if (store == null)
-            store = new Calendar.EventStore ();
-        return store;
+        return store ?? new Calendar.EventStore ();
     }
 
     static construct {
@@ -336,7 +334,7 @@ public class Calendar.EventStore : Object {
     private DateTime get_page () {
         string? month_page = null;
         if (state_settings != null) {
-            month_page = state_settings.get_string ("month-page");
+            month_page = ((!) state_settings).get_string ("month-page");
         }
 
         if (month_page == null || month_page == "") {
@@ -409,13 +407,15 @@ public class Calendar.EventStore : Object {
         var iso_last = ECal.isodate_from_time_t ((time_t) data_range.last_dt.add_days (1).to_unix ());
         var query = @"(occur-in-time-range? (make-time \"$iso_first\") (make-time \"$iso_last\"))";
 
-        ECal.Client client;
+        ECal.Client? client;
         lock (source_client) {
             client = source_client.get (source.dup_uid ());
         }
 
-        if (client == null)
+        if (client == null) {
             return;
+        }
+        client = (!) client;
 
         debug ("Getting client-view for source '%s'", source.dup_display_name ());
         client.get_view.begin (query, null, (obj, results) => {

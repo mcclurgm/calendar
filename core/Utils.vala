@@ -37,20 +37,21 @@ namespace Maya.Util {
      */
     public string get_source_location (E.Source source) {
         var registry = Calendar.EventStore.get_default ().registry;
-        string parent_uid = source.parent;
-        E.Source parent_source = source;
+        string? parent_uid = source.parent;
+        E.Source? parent_source = source;
         while (parent_source != null) {
-            parent_uid = parent_source.parent;
+            var unwrapped_parent_source = (!) parent_source; // Guaranteed by while loop to not be null
+            parent_uid = unwrapped_parent_source.parent;
 
-            if (parent_source.has_extension (E.SOURCE_EXTENSION_AUTHENTICATION)) {
-                var collection = (E.SourceAuthentication)parent_source.get_extension (E.SOURCE_EXTENSION_AUTHENTICATION);
+            if (unwrapped_parent_source.has_extension (E.SOURCE_EXTENSION_AUTHENTICATION)) {
+                var collection = (E.SourceAuthentication)unwrapped_parent_source.get_extension (E.SOURCE_EXTENSION_AUTHENTICATION);
                 if (collection.user != null) {
                     return collection.user;
                 }
             }
 
-            if (parent_source.has_extension (E.SOURCE_EXTENSION_COLLECTION)) {
-                var collection = (E.SourceCollection)parent_source.get_extension (E.SOURCE_EXTENSION_COLLECTION);
+            if (unwrapped_parent_source.has_extension (E.SOURCE_EXTENSION_COLLECTION)) {
+                var collection = (E.SourceCollection)unwrapped_parent_source.get_extension (E.SOURCE_EXTENSION_COLLECTION);
                 if (collection.identity != null) {
                     return collection.identity;
                 }
@@ -59,7 +60,7 @@ namespace Maya.Util {
             if (parent_uid == null)
                 break;
 
-            parent_source = registry.ref_source (parent_uid);
+            parent_source = registry.ref_source ((!) parent_uid);
         }
 
         return _("On this computer");
@@ -93,9 +94,10 @@ namespace Maya.Util {
         if (original == null) {
             return null;
         }
+        var unwrapped = (!) original;
 
-        ECal.Component copy = original.clone ();
-        E.Source source = original.get_data<E.Source> ("source");
+        ECal.Component copy = unwrapped.clone ();
+        E.Source source = unwrapped.get_data<E.Source> ("source");
         copy.set_data<E.Source> ("source", source);
         return copy;
     }
