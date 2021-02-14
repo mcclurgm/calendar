@@ -515,8 +515,11 @@ public class Calendar.EventStore : Object {
             unowned string uid = comp.get_uid ();
             var events_for_source = source_events.get (source);
             var events_for_uid = events_for_source.get (uid);
+            
+            ICal.Component? icalcomp = events_for_uid.to_array ()[0].get_icalcomponent ();
+            string? first_rid = (icalcomp == null) ? icalcomp.get_recurrenceid ().as_ical_string () : null;
             if (events_for_uid.size > 1 ||
-                events_for_uid.to_array ()[0].get_icalcomponent ().get_recurrenceid ().as_ical_string () != null ||
+                first_rid != null ||
                 comp.get_recurrenceid ().as_ical_string () != null) {
 
                 /* Either original or new event is recurring: rebuild our set of recurrences with new data */
